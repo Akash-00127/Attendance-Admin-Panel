@@ -18,8 +18,12 @@ import {
   Bell,
   CalendarCheck,
   CheckCircle,
+  ClipboardCheck,
   Clock,
+  Eye,
+  EyeOff,
   LayoutDashboard,
+  LogOut,
   Menu,
   Moon,
   Pencil,
@@ -28,18 +32,20 @@ import {
   Shield,
   Sun,
   Trash2,
+  User,
   Users,
   Wallet,
   X,
 } from "lucide-react";
 
-import { api, AttendanceRecord, CommunityPost, Employee, SalaryRow, Summary } from "@/lib/api";
+import { api, AdminUser, AttendanceRecord, CommunityPost, Employee, LeaveRequest, SalaryRow, Summary } from "@/lib/api";
 
 const navItems = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "employees", label: "Employees", icon: Users },
   { id: "attendance", label: "Attendance", icon: CalendarCheck },
   { id: "salary", label: "Salary", icon: Wallet },
+  { id: "leave", label: "Leave Requests", icon: ClipboardCheck },
   { id: "community", label: "Community", icon: Bell },
   { id: "settings", label: "Settings", icon: Settings },
 ] as const;
@@ -90,6 +96,78 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`badge ${status}`}>{status.replace("_", " ")}</span>;
 }
 
+const emptyAdminForm = { username: "", email: "", password: "" };
+
+function PasswordInput({ value, onChange, placeholder }: { value: string; onChange: (value: string) => void; placeholder: string }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="password-wrap">
+      <input
+        className="input password-input"
+        type={visible ? "text" : "password"}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
+      <button className="password-eye" type="button" onClick={() => setVisible((next) => !next)} aria-label={visible ? "Hide password" : "Show password"}>
+        {visible ? <EyeOff size={17} /> : <Eye size={17} />}
+      </button>
+    </div>
+  );
+}
+
+function LoginScreen({ onLogin }: { onLogin: (token: string, user: AdminUser) => void }) {
+  const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [hasAdmin, setHasAdmin] = useState(true);
+
+  useEffect(() => {
+    api.adminSetupStatus()
+      .then((status) => {
+        setHasAdmin(status.hasAdmin);
+        if (!status.hasAdmin) setMessage("No admin account exists yet. Please create one from Settings after an authorized admin login.");
+      })
+      .catch(() => setMessage("Backend is not connected. Start backend on port 3001."));
+  }, []);
+
+  const submitLogin = async () => {
+    if (!identifier.trim() || password.length < 8) {
+      setMessage("Enter username/email and minimum 8 digit password.");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      const res = await api.adminLogin({ identifier: identifier.trim(), password });
+      onLogin(res.accessToken, res.user);
+    } catch (error) {
+      const nextMessage = error instanceof Error ? error.message : "Unable to login admin";
+      setMessage(nextMessage.includes("Invalid admin") ? "Invalid login. Use the admin username/email and password created from Settings." : nextMessage);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="auth-shell">
+      <div className="auth-card card card-pad">
+        <img src="/srv-logo.png" alt="SRV Electricals" className="auth-logo" />
+        <div className="auth-kicker"><Shield size={16} /> Attendance Admin Panel</div>
+        <h1>Admin Login</h1>
+        <p className="muted">{hasAdmin ? "Login with your username or email and password." : "No admin account found. Create the first admin to continue."}</p>
+        <div className="form-stack">
+          <div className="input-icon"><User size={16} /><input className="input" value={identifier} onChange={(event) => setIdentifier(event.target.value)} placeholder="Username or email" /></div>
+          <PasswordInput value={password} onChange={setPassword} placeholder="Password" />
+          <button className="btn" disabled={busy || !hasAdmin} onClick={submitLogin}>{busy ? "Please wait..." : "Login"}</button>
+        </div>
+        {message && <div className="auth-message">{message}</div>}
+      </div>
+    </div>
+  );
+}
+
 export default function AdminPanel() {
   const [active, setActive] = useState<(typeof navItems)[number]["id"]>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -100,27 +178,37 @@ export default function AdminPanel() {
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
   const [salary, setSalary] = useState<SalaryRow[]>([]);
   const [community, setCommunity] = useState<CommunityPost[]>([]);
+  const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
   const [employeeDraft, setEmployeeDraft] = useState<Partial<Employee> | null>(null);
   const [selectedRole, setSelectedRole] = useState<string>("all");
+  const [selectedLeaveRole, setSelectedLeaveRole] = useState<string | null>(null);
+  const [selectedLeaveMessage, setSelectedLeaveMessage] = useState<LeaveRequest | null>(null);
   const [success, setSuccess] = useState("");
   const [postDraft, setPostDraft] = useState({ type: "notice" as CommunityPost["type"], title: "", body: "", audience: "All Teams", isPublished: true });
   const [message, setMessage] = useState("Loading backend data...");
+  const [adminUser, setAdminUser] = useState<AdminUser | null>(null);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [adminDraft, setAdminDraft] = useState(emptyAdminForm);
+  const [adminPasswordVisible, setAdminPasswordVisible] = useState(false);
 
   const loadAll = async () => {
+    if (!adminUser) return;
     try {
       setMessage("Loading backend data...");
-      const [nextSummary, nextEmployees, nextAttendance, nextSalary, nextCommunity] = await Promise.all([
+      const [nextSummary, nextEmployees, nextAttendance, nextSalary, nextCommunity, nextLeaves] = await Promise.all([
         api.summary(),
         api.employees(),
         api.attendance(30),
         api.salary(30),
         api.community(),
+        api.leaveRequests(),
       ]);
       setSummary(nextSummary);
       setEmployees(nextEmployees);
       setAttendance(nextAttendance);
       setSalary(nextSalary);
       setCommunity(nextCommunity);
+      setLeaveRequests(nextLeaves);
       setMessage("Synced with SRV backend");
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "Unable to connect to backend");
@@ -132,8 +220,22 @@ export default function AdminPanel() {
   }, [dark]);
 
   useEffect(() => {
-    loadAll();
+    const storedToken = window.localStorage.getItem("srv-admin-token");
+    const storedUser = window.localStorage.getItem("srv-admin-user");
+    if (storedToken && storedUser) {
+      try {
+        setAdminUser(JSON.parse(storedUser) as AdminUser);
+      } catch {
+        window.localStorage.removeItem("srv-admin-token");
+        window.localStorage.removeItem("srv-admin-user");
+      }
+    }
+    setSessionReady(true);
   }, []);
+
+  useEffect(() => {
+    if (adminUser) loadAll();
+  }, [adminUser]);
 
   useEffect(() => {
     const moveGlow = (event: MouseEvent) => {
@@ -165,6 +267,11 @@ export default function AdminPanel() {
   const roleData = Object.entries(summary?.roleCounts ?? {}).map(([name, value]) => ({ name: roleLabels[name] ?? name, value }));
   const dailyData = attendance.slice(0, 14).reverse().map((r) => ({ date: r.dateKey.slice(5), present: r.status === "present" ? 1 : 0, half: r.status === "half_day" ? 1 : 0 }));
   const totalPayroll = salary.reduce((sum, row) => sum + row.salary.netPayable, 0);
+  const leaveRoleCounts = roleCards.reduce<Record<string, number>>((acc, item) => {
+    acc[item.role] = leaveRequests.filter((request) => request.role === item.role).length;
+    return acc;
+  }, {});
+  const filteredLeaves = selectedLeaveRole ? leaveRequests.filter((request) => request.role === selectedLeaveRole) : leaveRequests;
 
   const saveEmployee = async () => {
     if (!employeeDraft?.id) return;
@@ -198,8 +305,47 @@ export default function AdminPanel() {
     await loadAll();
   };
 
+  const respondLeave = async (request: LeaveRequest, status: LeaveRequest["status"]) => {
+    const adminResponse = window.prompt(status === "approved" ? "Approval note optional" : "Reason for rejection optional", request.adminResponse ?? "") ?? undefined;
+    await api.updateLeaveRequest(request.id, { status, adminResponse });
+    setSuccess(`Leave ${status}`);
+    await loadAll();
+  };
+
+  const handleLogin = (token: string, user: AdminUser) => {
+    window.localStorage.setItem("srv-admin-token", token);
+    window.localStorage.setItem("srv-admin-user", JSON.stringify(user));
+    setAdminUser(user);
+    setMessage("Synced with SRV backend");
+  };
+
+  const handleLogout = () => {
+    window.localStorage.removeItem("srv-admin-token");
+    window.localStorage.removeItem("srv-admin-user");
+    setAdminUser(null);
+    setSummary(null);
+    setEmployees([]);
+    setAttendance([]);
+    setSalary([]);
+    setCommunity([]);
+    setLeaveRequests([]);
+  };
+
+  const createSettingsAdmin = async () => {
+    if (!adminDraft.username.trim() || !adminDraft.email.trim() || adminDraft.password.length < 8) {
+      setSuccess("Admin needs username, email, and minimum 8 digit password");
+      return;
+    }
+    await api.createAdmin(adminDraft);
+    setAdminDraft(emptyAdminForm);
+    setSuccess("Admin created successfully");
+  };
+
+  if (!sessionReady) return null;
+  if (!adminUser) return <LoginScreen onLogin={handleLogin} />;
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${active === "dashboard" ? "hover-enabled" : ""}`}>
       <aside className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
         <div className="brand">
           <img src="/srv-logo-white.png" alt="SRV" className="brand-logo" />
@@ -217,6 +363,7 @@ export default function AdminPanel() {
               onClick={() => {
                 setActive(id);
                 if (id === "employees") setSelectedRole("all");
+                if (id === "leave") setSelectedLeaveRole(null);
               }}
             >
               <Icon size={18} />
@@ -242,8 +389,8 @@ export default function AdminPanel() {
           <div className="avatar">AD</div>
           {sidebarOpen && (
             <div>
-              <div style={{ color: "#e8eeff", fontWeight: 800, fontSize: 12 }}>Admin User</div>
-              <div className="brand-sub">admin@srv.local</div>
+              <div style={{ color: "#e8eeff", fontWeight: 800, fontSize: 12 }}>{adminUser.username}</div>
+              <div className="brand-sub">{adminUser.email}</div>
             </div>
           )}
         </div>
@@ -261,6 +408,7 @@ export default function AdminPanel() {
             <input className="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search employees..." style={{ paddingLeft: 36 }} />
           </div>
           <button className="theme-toggle" onClick={() => setDark((v) => !v)}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>
+          <button className="icon-btn" onClick={handleLogout} title="Logout"><LogOut size={17} /></button>
         </header>
 
         <section className="content">
@@ -409,6 +557,63 @@ export default function AdminPanel() {
             </div>
           )}
 
+          {active === "leave" && (
+            <div className="grid">
+              <div className="grid stats-grid">
+                {roleCards.map((item) => (
+                  <button
+                    key={item.role}
+                    className={`card role-card ${selectedLeaveRole === item.role ? "selected-role-card" : ""}`}
+                    onClick={() => setSelectedLeaveRole(item.role)}
+                  >
+                    <span className="role-card-icon" style={{ background: `${item.color}18`, color: item.color }}>
+                      <ClipboardCheck size={20} />
+                    </span>
+                    <span className="role-card-value">{leaveRoleCounts[item.role] ?? 0}</span>
+                    <span className="role-card-label">{item.label}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="card">
+                <div className="card-pad section-head">
+                  <h2 className="card-title">{selectedLeaveRole ? roleLabels[selectedLeaveRole] : "All Leave Requests"}</h2>
+                  <div className="controls">
+                    <button className={`btn secondary ${!selectedLeaveRole ? "soft-active" : ""}`} onClick={() => setSelectedLeaveRole(null)}>All</button>
+                    <span className="role-pill">{filteredLeaves.length} requests</span>
+                  </div>
+                </div>
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr><th>Employee</th><th>Role</th><th>Leave Date</th><th>Requested On</th><th>Message</th><th>Status</th><th>Response</th></tr></thead>
+                    <tbody>
+                      {filteredLeaves.map((request) => (
+                        <tr key={request.id}>
+                          <td><div className="employee-cell"><div className="avatar">{request.employee?.avatarColorSeed ?? "SR"}</div><div><strong>{request.employee?.name ?? request.employeeId}</strong><div className="muted">{request.employee?.employeeCode ?? "Employee"}</div></div></div></td>
+                          <td>{roleLabels[request.role]}</td>
+                          <td>{request.leaveDate}</td>
+                          <td>{new Date(request.createdAt).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
+                          <td>
+                            <button className="message-open-btn" onClick={() => setSelectedLeaveMessage(request)}>
+                              <Eye size={15} /> Open Message
+                            </button>
+                          </td>
+                          <td><StatusBadge status={request.status} /></td>
+                          <td>
+                            <div className="controls">
+                              <button className="btn approve-btn" disabled={request.status === "approved"} onClick={() => respondLeave(request, "approved")}>Approve</button>
+                              <button className="btn reject-btn" disabled={request.status === "rejected"} onClick={() => respondLeave(request, "rejected")}>Reject</button>
+                            </div>
+                            {request.adminResponse && <div className="muted" style={{ marginTop: 6 }}>{request.adminResponse}</div>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
           {active === "community" && (
             <div className="grid two-grid">
               <div className="card card-pad">
@@ -451,23 +656,58 @@ export default function AdminPanel() {
           )}
 
           {active === "settings" && (
-            <div className="card card-pad">
-              <h2 className="card-title">App Management</h2>
-              <p className="muted">Manage attendance rules, payroll behavior, employee sync, and app announcements.</p>
-              <div className="controls">
-                <button className="btn" onClick={loadAll}>Refresh Data</button>
-                <button className="btn secondary" onClick={() => setDark((v) => !v)}>{dark ? "Switch Light Mode" : "Switch Dark Mode"}</button>
+            <div className="settings-grid">
+              <div className="card card-pad">
+                <h2 className="card-title">App Management</h2>
+                <p className="muted">Manage attendance rules, payroll behavior, employee sync, and app announcements.</p>
+                <div className="controls">
+                  <button className="btn" onClick={loadAll}>Refresh Data</button>
+                  <button className="btn secondary" onClick={() => setDark((v) => !v)}>{dark ? "Switch Light Mode" : "Switch Dark Mode"}</button>
+                </div>
+                <div className="grid stats-grid" style={{ marginTop: 18 }}>
+                  <StatCard icon={Shield} label="Employee Sync" value="5 sec" sub="Profile and attendance refresh automatically" color="#6366F1" />
+                  <StatCard icon={BarChart3} label="Payroll Rule" value="30 Days" sub="Per-day pay updates from Basic Pay / 30" color="#22D3EE" />
+                  <StatCard icon={Bell} label="Community Feed" value="Live" sub="Published notices appear in employee profiles" color="#34D399" />
+                  <StatCard icon={Settings} label="Current Theme" value={dark ? "Dark" : "Light"} sub="Admin display preference" color="#F59E0B" />
+                </div>
               </div>
-              <div className="grid stats-grid" style={{ marginTop: 18 }}>
-                <StatCard icon={Shield} label="Employee Sync" value="5 sec" sub="Profile and attendance refresh automatically" color="#6366F1" />
-                <StatCard icon={BarChart3} label="Payroll Rule" value="30 Days" sub="Per-day pay updates from Basic Pay / 30" color="#22D3EE" />
-                <StatCard icon={Bell} label="Community Feed" value="Live" sub="Published notices appear in employee profiles" color="#34D399" />
-                <StatCard icon={Settings} label="Current Theme" value={dark ? "Dark" : "Light"} sub="Admin display preference" color="#F59E0B" />
+              <div className="card card-pad">
+                <div className="section-head"><h2 className="card-title">Create Admin</h2><span className="role-pill">Secure access</span></div>
+                <p className="muted">Add another admin who can login with username or email.</p>
+                <div className="grid form-grid" style={{ marginTop: 16 }}>
+                  <input className="input" value={adminDraft.username} onChange={(e) => setAdminDraft({ ...adminDraft, username: e.target.value })} placeholder="Admin username" />
+                  <input className="input" type="email" value={adminDraft.email} onChange={(e) => setAdminDraft({ ...adminDraft, email: e.target.value })} placeholder="Admin email" />
+                  <div className="password-wrap wide-field">
+                    <input className="input password-input" type={adminPasswordVisible ? "text" : "password"} value={adminDraft.password} onChange={(e) => setAdminDraft({ ...adminDraft, password: e.target.value })} placeholder="Password minimum 8 digits" />
+                    <button className="password-eye" type="button" onClick={() => setAdminPasswordVisible((v) => !v)}>{adminPasswordVisible ? <EyeOff size={17} /> : <Eye size={17} />}</button>
+                  </div>
+                </div>
+                <button className="btn" style={{ marginTop: 14 }} onClick={createSettingsAdmin}>Create Admin</button>
               </div>
             </div>
           )}
         </section>
       </main>
+
+      {selectedLeaveMessage && (
+        <div className="modal-overlay" onClick={() => setSelectedLeaveMessage(null)}>
+          <div className="message-detail card card-pad" onClick={(event) => event.stopPropagation()}>
+            <div className="section-head">
+              <div>
+                <h2 className="card-title">Leave Message</h2>
+                <p className="muted">{selectedLeaveMessage.employee?.name ?? selectedLeaveMessage.employeeId} - {selectedLeaveMessage.leaveDate}</p>
+              </div>
+              <button className="icon-btn" onClick={() => setSelectedLeaveMessage(null)}><X size={16} /></button>
+            </div>
+            <div className="message-body-box">{selectedLeaveMessage.message}</div>
+            {selectedLeaveMessage.adminResponse && <div className="message-response-box"><strong>Admin response:</strong> {selectedLeaveMessage.adminResponse}</div>}
+            <div className="controls" style={{ marginTop: 16 }}>
+              <button className="btn approve-btn" disabled={selectedLeaveMessage.status === "approved"} onClick={() => respondLeave(selectedLeaveMessage, "approved")}>Approve</button>
+              <button className="btn reject-btn" disabled={selectedLeaveMessage.status === "rejected"} onClick={() => respondLeave(selectedLeaveMessage, "rejected")}>Reject</button>
+            </div>
+          </div>
+        </div>
+      )}
       {employeeDraft && (
         <div className="modal-overlay" onClick={() => setEmployeeDraft(null)}>
           <div className="edit-modal card card-pad" onClick={(event) => event.stopPropagation()}>
