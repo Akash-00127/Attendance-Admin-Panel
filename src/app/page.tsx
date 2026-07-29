@@ -19,6 +19,7 @@ import {
   CalendarCheck,
   CheckCircle,
   ClipboardCheck,
+  MapPin,
   Clock,
   Eye,
   EyeOff,
@@ -26,8 +27,10 @@ import {
   LogOut,
   Menu,
   Moon,
+  Navigation,
   Pencil,
   Search,
+  RefreshCw,
   Settings,
   Shield,
   Sun,
@@ -38,12 +41,13 @@ import {
   X,
 } from "lucide-react";
 
-import { api, AdminUser, AttendanceRecord, CommunityPost, Employee, LeaveRequest, SalaryRow, Summary } from "@/lib/api";
+import { api, AdminUser, AttendanceRecord, CommunityPost, Employee, FieldLocation, LeaveRequest, SalaryRow, Summary } from "@/lib/api";
 
 const navItems = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "employees", label: "Employees", icon: Users },
   { id: "attendance", label: "Attendance", icon: CalendarCheck },
+  { id: "fieldTracking", label: "Field Tracking", icon: MapPin },
   { id: "salary", label: "Salary", icon: Wallet },
   { id: "leave", label: "Leave Requests", icon: ClipboardCheck },
   { id: "community", label: "Community", icon: Bell },
@@ -75,6 +79,36 @@ function formatTime(value?: string | null) {
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "Not updated";
+  return new Date(value).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function locationFreshness(value?: string | null) {
+  if (!value) return "Waiting for app update";
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
+  if (minutes < 1) return "Updated just now";
+  if (minutes < 60) return `Updated ${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return `Updated ${hours}h ${rest}m ago`;
+}
+
+function hasCoordinates(location?: FieldLocation | null) {
+  return location?.latitude != null && location?.longitude != null;
+}
+
+function openStreetMapEmbed(location: FieldLocation) {
+  const lat = Number(location.latitude);
+  const lng = Number(location.longitude);
+  const delta = 0.012;
+  return `https://www.openstreetmap.org/export/embed.html?bbox=${lng - delta}%2C${lat - delta}%2C${lng + delta}%2C${lat + delta}&layer=mapnik&marker=${lat}%2C${lng}`;
+}
+
+function externalMapLink(location: FieldLocation) {
+  return `https://www.google.com/maps/search/?api=1&query=${location.latitude},${location.longitude}`;
+}
 function money(value: number) {
   return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value);
 }
@@ -116,7 +150,7 @@ function PasswordInput({ value, onChange, placeholder }: { value: string; onChan
   );
 }
 
-function LoginScreen({ onLogin }: { onLogin: (token: string, user: AdminUser) => void }) {
+function LoginScreen({ onLogin, dark, onToggleTheme }: { onLogin: (token: string, user: AdminUser) => void; dark: boolean; onToggleTheme: () => void }) {
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
@@ -151,7 +185,10 @@ function LoginScreen({ onLogin }: { onLogin: (token: string, user: AdminUser) =>
   };
 
   return (
-    <div className="auth-shell">
+    <div className={`auth-shell ${dark ? "dark" : "light"}`}>
+      <button className="theme-toggle auth-theme-toggle" onClick={onToggleTheme} title={dark ? "Switch Light Mode" : "Switch Dark Mode"}>
+        {dark ? <Sun size={18} /> : <Moon size={18} />}
+      </button>
       <div className="auth-card card card-pad">
         <img src="/srv-logo.png" alt="SRV Electricals" className="auth-logo" />
         <div className="auth-kicker"><Shield size={16} /> Attendance Admin Panel</div>
@@ -171,7 +208,7 @@ function LoginScreen({ onLogin }: { onLogin: (token: string, user: AdminUser) =>
 export default function AdminPanel() {
   const [active, setActive] = useState<(typeof navItems)[number]["id"]>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = useState(true);
   const [query, setQuery] = useState("");
   const [summary, setSummary] = useState<Summary | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -179,10 +216,12 @@ export default function AdminPanel() {
   const [salary, setSalary] = useState<SalaryRow[]>([]);
   const [community, setCommunity] = useState<CommunityPost[]>([]);
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
+  const [fieldLocations, setFieldLocations] = useState<FieldLocation[]>([]);
   const [employeeDraft, setEmployeeDraft] = useState<Partial<Employee> | null>(null);
   const [selectedRole, setSelectedRole] = useState<string>("all");
   const [selectedLeaveRole, setSelectedLeaveRole] = useState<string | null>(null);
   const [selectedLeaveMessage, setSelectedLeaveMessage] = useState<LeaveRequest | null>(null);
+  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
   const [success, setSuccess] = useState("");
   const [postDraft, setPostDraft] = useState({ type: "notice" as CommunityPost["type"], title: "", body: "", audience: "All Teams", isPublished: true });
   const [message, setMessage] = useState("Loading backend data...");
@@ -195,13 +234,14 @@ export default function AdminPanel() {
     if (!adminUser) return;
     try {
       setMessage("Loading backend data...");
-      const [nextSummary, nextEmployees, nextAttendance, nextSalary, nextCommunity, nextLeaves] = await Promise.all([
+      const [nextSummary, nextEmployees, nextAttendance, nextSalary, nextCommunity, nextLeaves, nextFieldLocations] = await Promise.all([
         api.summary(),
         api.employees(),
         api.attendance(30),
         api.salary(30),
         api.community(),
         api.leaveRequests(),
+        api.fieldTracking(),
       ]);
       setSummary(nextSummary);
       setEmployees(nextEmployees);
@@ -209,6 +249,7 @@ export default function AdminPanel() {
       setSalary(nextSalary);
       setCommunity(nextCommunity);
       setLeaveRequests(nextLeaves);
+      setFieldLocations(nextFieldLocations);
       setMessage("Synced with SRV backend");
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "Unable to connect to backend");
@@ -238,16 +279,11 @@ export default function AdminPanel() {
   }, [adminUser]);
 
   useEffect(() => {
-    const moveGlow = (event: MouseEvent) => {
-      document.querySelectorAll<HTMLElement>(".card").forEach((card) => {
-        const rect = card.getBoundingClientRect();
-        card.style.setProperty("--mx", `${event.clientX - rect.left}px`);
-        card.style.setProperty("--my", `${event.clientY - rect.top}px`);
-      });
-    };
-    window.addEventListener("mousemove", moveGlow);
-    return () => window.removeEventListener("mousemove", moveGlow);
-  }, []);
+    if (!adminUser) return;
+    const timer = window.setInterval(loadAll, 5000);
+    return () => window.clearInterval(timer);
+  }, [adminUser]);
+
 
   useEffect(() => {
     if (!success) return;
@@ -272,7 +308,10 @@ export default function AdminPanel() {
     return acc;
   }, {});
   const filteredLeaves = selectedLeaveRole ? leaveRequests.filter((request) => request.role === selectedLeaveRole) : leaveRequests;
-
+  const locatedFieldLocations = fieldLocations.filter(hasCoordinates);
+  const onDutyFieldLocations = fieldLocations.filter((location) => location.isOnDuty);
+  const selectedFieldLocation =
+    fieldLocations.find((location) => location.employee.id === selectedFieldId) ?? locatedFieldLocations[0] ?? fieldLocations[0] ?? null;
   const saveEmployee = async () => {
     if (!employeeDraft?.id) return;
     await api.updateEmployee(employeeDraft.id, employeeDraft);
@@ -305,6 +344,12 @@ export default function AdminPanel() {
     await loadAll();
   };
 
+
+  const requestFieldLocation = async (location: FieldLocation) => {
+    await api.requestFieldLocation(location.employee.id);
+    setSuccess(`Location request sent to ${location.employee.name}`);
+    await loadAll();
+  };
   const respondLeave = async (request: LeaveRequest, status: LeaveRequest["status"]) => {
     const adminResponse = window.prompt(status === "approved" ? "Approval note optional" : "Reason for rejection optional", request.adminResponse ?? "") ?? undefined;
     await api.updateLeaveRequest(request.id, { status, adminResponse });
@@ -329,6 +374,7 @@ export default function AdminPanel() {
     setSalary([]);
     setCommunity([]);
     setLeaveRequests([]);
+    setFieldLocations([]);
   };
 
   const createSettingsAdmin = async () => {
@@ -342,10 +388,10 @@ export default function AdminPanel() {
   };
 
   if (!sessionReady) return null;
-  if (!adminUser) return <LoginScreen onLogin={handleLogin} />;
+  if (!adminUser) return <LoginScreen onLogin={handleLogin} dark={dark} onToggleTheme={() => setDark((v) => !v)} />;
 
   return (
-    <div className={`app-shell ${active === "dashboard" ? "hover-enabled" : ""}`}>
+    <div className={`app-shell ${dark ? "dark" : "light"}`}>
       <aside className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
         <div className="brand">
           <img src="/srv-logo-white.png" alt="SRV" className="brand-logo" />
@@ -413,7 +459,7 @@ export default function AdminPanel() {
 
         <section className="content">
           {active === "dashboard" && (
-            <div className="grid">
+            <div className="grid dashboard-page">
               <div className="grid stats-grid">
                 <StatCard icon={Users} label="Total Employees" value={`${summary?.totalEmployees ?? 0}`} sub="All SRV roles" color="#6366F1" />
                 <StatCard icon={CheckCircle} label="Present Today" value={`${summary?.presentToday ?? 0}`} sub="Checked or completed" color="#34D399" />
@@ -485,7 +531,7 @@ export default function AdminPanel() {
                 </div>
                 <div className="table-wrap">
                   <table>
-                    <thead><tr><th>Employee</th><th>Role</th><th>Phone</th><th>Basic Pay</th><th>Per Day</th><th>Per Hour</th><th>Action</th></tr></thead>
+                    <thead><tr><th>Employee</th><th>Role</th><th>Phone</th><th>Basic Pay</th><th>Advance</th><th>Hour Deduction</th><th>Per Day</th><th>Per Hour</th><th>Action</th></tr></thead>
                     <tbody>
                       {filteredEmployees.map((e) => (
                         <tr key={e.id}>
@@ -493,6 +539,8 @@ export default function AdminPanel() {
                           <td>{roleLabels[e.role]}</td>
                           <td>{e.phone}</td>
                           <td>{money(e.monthlySalary)}</td>
+                          <td><span className={Number(e.advanceMoney ?? 0) > 0 ? "advance-money-text" : "muted"}>{money(Number(e.advanceMoney ?? 0))}</span></td>
+                                                    <td><span className={Number(e.workingHourDeductionMinutes ?? 0) > 0 ? "deduction-text" : "muted"}>{formatHours(e.workingHourDeductionMinutes ?? 0)}</span></td>
                           <td>{money(e.perDaySalary)}</td>
                           <td>{money(Math.round(e.perDaySalary / 9))}</td>
                           <td>
@@ -510,6 +558,84 @@ export default function AdminPanel() {
             </div>
           )}
 
+
+          {active === "fieldTracking" && (
+            <div className="grid field-tracking-grid">
+              <div className="grid stats-grid">
+                <StatCard icon={MapPin} label="Field Employees" value={`${fieldLocations.length}`} sub="Sales / Field Team only" color="#F59E0B" />
+                <StatCard icon={Navigation} label="On Duty Now" value={`${onDutyFieldLocations.length}`} sub="Checked in and trackable" color="#22D3EE" />
+                <StatCard icon={CheckCircle} label="Location Available" value={`${locatedFieldLocations.length}`} sub="GPS received by backend" color="#34D399" />
+                <StatCard icon={RefreshCw} label="Auto Refresh" value="5 sec" sub="Admin map sync interval" color="#6366F1" />
+              </div>
+
+              <div className="field-map-layout">
+                <div className="card card-pad field-map-card">
+                  <div className="section-head">
+                    <div>
+                      <h2 className="card-title">Live Field Map</h2>
+                      <p className="muted">Current location updates from checked-in Sales / Field employees.</p>
+                    </div>
+                    <button className="btn secondary" onClick={loadAll}><RefreshCw size={15} /> Refresh</button>
+                  </div>
+                  {selectedFieldLocation && hasCoordinates(selectedFieldLocation) ? (
+                    <>
+                      <iframe
+                        className="field-map"
+                        src={openStreetMapEmbed(selectedFieldLocation)}
+                        loading="lazy"
+                        title={`${selectedFieldLocation.employee.name} live location`}
+                      />
+                      <div className="map-focus-card">
+                        <div className="employee-cell">
+                          <div className="avatar">{selectedFieldLocation.employee.avatarColorSeed}</div>
+                          <div>
+                            <strong>{selectedFieldLocation.employee.name}</strong>
+                            <div className="muted">{selectedFieldLocation.employee.employeeCode}</div>
+                          </div>
+                        </div>
+                        <div className="controls">
+                          <span className={`badge ${selectedFieldLocation.isOnDuty ? "present" : "pending"}`}>{selectedFieldLocation.isOnDuty ? "On duty" : "Off duty"}</span>
+                          <a className="btn secondary map-link" href={externalMapLink(selectedFieldLocation)} target="_blank" rel="noreferrer">Open Map</a>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="empty-map-state">
+                      <MapPin size={42} />
+                      <h3>No live field location yet</h3>
+                      <p className="muted">Ask a Sales / Field employee to login, check in, and keep location permission enabled.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="card card-pad field-list-card">
+                  <div className="section-head"><h2 className="card-title">Sales / Field Team</h2><span className="role-pill">{fieldLocations.length} employees</span></div>
+                  <div className="field-location-list">
+                    {fieldLocations.map((location) => (
+                      <button
+                        key={location.employee.id}
+                        className={`field-location-item ${selectedFieldLocation?.employee.id === location.employee.id ? "active" : ""}`}
+                        onClick={() => setSelectedFieldId(location.employee.id)}
+                      >
+                        <div className="employee-cell">
+                          <div className="avatar">{location.employee.avatarColorSeed}</div>
+                          <div>
+                            <strong>{location.employee.name}</strong>
+                            <div className="muted">{location.employee.phone || location.employee.employeeCode}</div>
+                          </div>
+                        </div>
+                        <span className={`badge ${location.isOnDuty ? "present" : "pending"}`}>{location.isOnDuty ? "On duty" : "Off duty"}</span>
+                        <div className="field-address"><MapPin size={14} /> {location.address ?? "Location not received"}</div>
+                        <div className="field-meta">{locationFreshness(location.locationUpdatedAt)}{location.checkInTime ? ` - In ${formatTime(location.checkInTime)}` : ""}</div>
+                        <button className="btn secondary location-request-btn" onClick={(event) => { event.stopPropagation(); requestFieldLocation(location); }}><MapPin size={15} /> Turn On Location</button>
+                      </button>
+                    ))}
+                    {fieldLocations.length === 0 && <div className="muted">No Sales / Field employees found.</div>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           {active === "attendance" && (
             <div className="card">
               <div className="card-pad section-head"><h2 className="card-title">Attendance Control</h2><span className="role-pill">Last 30 days</span></div>
@@ -538,16 +664,18 @@ export default function AdminPanel() {
               <div className="card-pad section-head"><h2 className="card-title">Salary Report</h2><span className="role-pill">{money(totalPayroll)} total</span></div>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Employee</th><th>Attendance</th><th>Present</th><th>Half</th><th>Earned</th><th>Overtime</th><th>Net Payable</th></tr></thead>
+                  <thead><tr><th>Employee</th><th>Attendance</th><th>Present</th><th>Earned</th><th>Overtime</th><th>Advance</th><th>Hour Deduction</th><th>Gross</th><th>Net Payable</th></tr></thead>
                   <tbody>
                     {salary.map(({ employee, salary: s }) => (
                       <tr key={employee.id}>
                         <td><div className="employee-cell"><div className="avatar">{employee.avatarColorSeed}</div>{employee.name}</div></td>
                         <td>{s.attendancePercent}%</td>
                         <td>{s.presentDays}</td>
-                        <td>{s.halfDays}</td>
                         <td>{money(s.earnedBasic)}</td>
                         <td>{money(s.overtimeBonus)}</td>
+                        <td><span className="advance-money-text">-{money(s.advanceMoney ?? employee.advanceMoney ?? 0)}</span></td>
+                                                <td><span className={Number(s.workingHourDeductionMinutes ?? employee.workingHourDeductionMinutes ?? 0) > 0 ? "deduction-text" : "muted"} title={s.workingHourDeductionReason ?? employee.workingHourDeductionReason ?? ""}>{formatHours(s.workingHourDeductionMinutes ?? employee.workingHourDeductionMinutes ?? 0)}</span></td>
+                        <td>{money(s.grossPayable ?? s.earnedBasic + s.overtimeBonus)}</td>
                         <td><strong>{money(s.netPayable)}</strong></td>
                       </tr>
                     ))}
@@ -720,10 +848,15 @@ export default function AdminPanel() {
               <input className="input" value={employeeDraft.phone ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, phone: e.target.value.replace(/\D/g, "").slice(0, 10) })} placeholder="Mobile number" />
               <input className="input" value={employeeDraft.email ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, email: e.target.value })} placeholder="Email optional" />
               <input className="input" type="number" value={employeeDraft.monthlySalary ?? 0} onChange={(e) => setEmployeeDraft({ ...employeeDraft, monthlySalary: Number(e.target.value) })} placeholder="Basic pay" />
+              <input className="input" type="number" min="0" value={employeeDraft.advanceMoney ?? 0} onChange={(e) => setEmployeeDraft({ ...employeeDraft, advanceMoney: Math.max(0, Number(e.target.value) || 0) })} placeholder="Advance money / borrowing" />
+                          <input className="input" type="number" min="0" step="0.25" value={Number(employeeDraft.workingHourDeductionMinutes ?? 0) / 60} onChange={(e) => setEmployeeDraft({ ...employeeDraft, workingHourDeductionMinutes: Math.max(0, Math.round((Number(e.target.value) || 0) * 60)) })} placeholder="Deduct working hours" />
+              <textarea className="textarea wide-field" value={employeeDraft.workingHourDeductionReason ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, workingHourDeductionReason: e.target.value })} placeholder="Reason for working hour deduction" />
             </div>
             <div className="salary-preview">
               <span>Per day: <strong>{money(Math.round(Number(employeeDraft.monthlySalary ?? 0) / 30))}</strong></span>
               <span>Per hour: <strong>{money(Math.round(Number(employeeDraft.monthlySalary ?? 0) / 30 / 9))}</strong></span>
+              <span>Advance: <strong className="advance-money-text">{money(Number(employeeDraft.advanceMoney ?? 0))}</strong></span>
+                          <span>Hour deduction: <strong className="deduction-text">{formatHours(employeeDraft.workingHourDeductionMinutes ?? 0)}</strong></span>
             </div>
             <button className="btn" onClick={saveEmployee}>Update Employee</button>
           </div>

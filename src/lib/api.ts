@@ -11,11 +11,22 @@ export interface Employee {
   department: string;
   monthlySalary: number;
   perDaySalary: number;
+  advanceMoney: number;
+  workingHourDeductionMinutes: number;
+  workingHourDeductionReason?: string | null;
+  workingHourDeductionUpdatedAt?: string | null;
   joinedOn: string;
   phone: string;
   email?: string | null;
   avatarColorSeed: string;
   profileImageUri?: string | null;
+  liveLatitude?: number | null;
+  liveLongitude?: number | null;
+  liveAddress?: string | null;
+  liveLocationUpdatedAt?: string | null;
+  locationRequestMessage?: string | null;
+  locationRequestRequestedAt?: string | null;
+  locationRequestSeenAt?: string | null;
 }
 
 export interface AttendanceRecord {
@@ -49,6 +60,12 @@ export interface SalaryRow {
     totalWorkingDays: number;
     earnedBasic: number;
     overtimeBonus: number;
+    advanceMoney: number;
+    workingHourDeductionMinutes: number;
+    workingHourDeductionHours: number;
+    workingHourDeductionReason?: string | null;
+    grossPayable: number;
+    deductions: number;
     netPayable: number;
   };
 }
@@ -76,6 +93,16 @@ export interface LeaveRequest {
   updatedAt: string;
 }
 
+
+export interface FieldLocation {
+  employee: Employee;
+  isOnDuty: boolean;
+  checkInTime?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  address?: string | null;
+  locationUpdatedAt?: string | null;
+}
 export interface AdminUser {
   id: string;
   username: string;
@@ -129,6 +156,8 @@ export const api = {
   attendance: (days = 30) => request<AttendanceRecord[]>(`/admin/attendance?days=${days}`),
   updateAttendance: (id: string, body: Partial<AttendanceRecord>) => request<AttendanceRecord>(`/admin/attendance/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   salary: (days = 30) => request<SalaryRow[]>(`/admin/salary?days=${days}`),
+  fieldTracking: () => request<FieldLocation[]>("/admin/field-tracking"),
+  requestFieldLocation: (id: string) => request<Employee>(`/admin/employees/${id}/request-location`, { method: "PATCH" }),
   leaveRequests: (role?: Role) => request<LeaveRequest[]>(`/admin/leave-requests${role ? `?role=${role}` : ""}`),
   updateLeaveRequest: (id: string, body: { status: LeaveRequest["status"]; adminResponse?: string }) =>
     request<LeaveRequest>(`/admin/leave-requests/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
