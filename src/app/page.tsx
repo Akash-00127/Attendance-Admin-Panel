@@ -56,18 +56,14 @@ const navItems = [
 ] as const;
 
 const roleLabels: Record<string, string> = {
-  accountant: "Account Team",
-  sales_field: "Sales Field",
-  factory_worker: "Factory Team",
-  it_team: "IT Team",
+  sales_man: "Sales Men",
+  srv_driver: "SRV Driver",
 };
 
 const chartColors = ["#6366F1", "#22D3EE", "#34D399", "#F59E0B"];
 const roleCards = [
-  { role: "accountant", label: "Account Team", color: "#6366F1" },
-  { role: "it_team", label: "IT Team", color: "#22D3EE" },
-  { role: "factory_worker", label: "Factory Team", color: "#34D399" },
-  { role: "sales_field", label: "Sales / Field Team", color: "#F59E0B" },
+  { role: "srv_driver", label: "SRV Driver", color: "#34D399" },
+  { role: "sales_man", label: "Sales Men", color: "#F59E0B" },
 ] as const;
 
 const EMPLOYEE_PAGE_SIZE = 30;
