@@ -1,10 +1,10 @@
 
 > srv-attendance-admin-panel@1.0.0 dev
-> next dev -p 3002
+> next dev -p 3003
 
    ▲ Next.js 15.5.20
-   - Local:        http://localhost:3002
-   - Network:      http://172.17.240.1:3002
+   - Local:        http://localhost:3003
+   - Network:      http://172.17.240.1:3003
 
  ✓ Starting...
  ✓ Ready in 4s

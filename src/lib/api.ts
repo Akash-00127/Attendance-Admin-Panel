@@ -1,6 +1,6 @@
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001/api";
 
-export type Role = "it_team" | "factory_worker" | "accountant" | "sales_field";
+export type Role = "srv_driver" | "sales_man";
 export type Status = "present" | "absent" | "half_day" | "leave" | "week_off" | "pending";
 
 export interface Employee {
