@@ -1,0 +1,14 @@
+
+> srv-attendance-admin-panel@1.0.0 dev
+> next dev -p 3002 -p 3102
+
+   ▲ Next.js 15.5.20
+   - Local:        http://localhost:3102
+   - Network:      http://172.17.240.1:3102
+
+ ✓ Starting...
+ ✓ Ready in 1965ms
+ ○ Compiling / ...
+ ✓ Compiled / in 5.4s (1654 modules)
+ GET / 200 in 5891ms
+[?25h

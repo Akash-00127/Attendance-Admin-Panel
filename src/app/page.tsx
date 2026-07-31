@@ -21,6 +21,7 @@ import {
   ClipboardCheck,
   MapPin,
   Clock,
+  Download,
   Eye,
   EyeOff,
   LayoutDashboard,
@@ -69,9 +70,32 @@ const roleCards = [
   { role: "sales_field", label: "Sales / Field Team", color: "#F59E0B" },
 ] as const;
 
+const EMPLOYEE_PAGE_SIZE = 30;
+const TABLE_PAGE_SIZE = 30;
+const CARD_PAGE_SIZE = 10;
+
+type ExportRow = Record<string, string | number | boolean | null | undefined>;
+type ExportFormat = "excel" | "zip" | "pdf" | "csv";
+
 function formatHours(minutes?: number | null) {
   if (minutes == null) return "-";
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function minutesToDeductionInput(minutes?: number | null) {
+  const safeMinutes = Math.max(0, Math.floor(Number(minutes ?? 0)));
+  const hours = Math.floor(safeMinutes / 60);
+  const mins = safeMinutes % 60;
+  return safeMinutes ? `${hours}.${String(mins).padStart(2, "0")}` : "";
+}
+
+function parseDeductionInput(value: string) {
+  const cleaned = value.replace(/[^0-9.:]/g, "");
+  if (!cleaned) return 0;
+  const [hoursPart, minutesPart] = cleaned.split(/[.:]/);
+  const hours = Math.max(0, Number(hoursPart) || 0);
+  const minutes = minutesPart == null || minutesPart === "" ? 0 : Math.min(59, Math.max(0, Number(minutesPart.padEnd(2, "0").slice(0, 2)) || 0));
+  return Math.round(hours * 60 + minutes);
 }
 
 function formatTime(value?: string | null) {
@@ -113,6 +137,101 @@ function money(value: number) {
   return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value);
 }
 
+
+function exportValue(value: ExportRow[string]) {
+  if (value == null) return "";
+  return String(value).replace(/\r?\n/g, " ").trim();
+}
+
+function rowsToCsv(rows: ExportRow[]) {
+  if (!rows.length) return "No data\n";
+  const headers = Object.keys(rows[0]);
+  const escape = (value: ExportRow[string]) => '"' + exportValue(value).replace(/"/g, '""') + '"';
+  return [headers.map(escape).join(","), ...rows.map((row) => headers.map((header) => escape(row[header])).join(","))].join("\n");
+}
+
+function rowsToHtmlTable(title: string, rows: ExportRow[]) {
+  const headers = rows.length ? Object.keys(rows[0]) : ["No data"];
+  const bodyRows = rows.length ? rows : [{ "No data": "No records found" }];
+  return `<html><head><meta charset="utf-8" /><style>body{font-family:Arial,sans-serif}table{border-collapse:collapse;width:100%}th,td{border:1px solid #cbd5e1;padding:8px;text-align:left}th{background:#eef2ff}</style></head><body><h2>${title}</h2><table><thead><tr>${headers.map((header) => `<th>${header}</th>`).join("")}</tr></thead><tbody>${bodyRows.map((row) => `<tr>${headers.map((header) => `<td>${exportValue(row[header])}</td>`).join("")}</tr>`).join("")}</tbody></table></body></html>`;
+}
+
+function escapePdfText(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+}
+
+function rowsToPdf(title: string, rows: ExportRow[]) {
+  const csvLines = rowsToCsv(rows).split("\n").slice(0, 44).map((line) => line.replace(/"/g, ""));
+  const lines = [title, `Generated: ${new Date().toLocaleString()}`, "", ...csvLines];
+  const content = ["BT /F1 11 Tf 40 790 Td"];
+  lines.forEach((line, index) => {
+    if (index) content.push("0 -16 Td");
+    content.push(`(${escapePdfText(line.slice(0, 115))}) Tj`);
+  });
+  content.push("ET");
+  const stream = content.join("\n");
+  const objects = [
+    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
+    "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
+    "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj",
+    "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
+    `5 0 obj << /Length ${stream.length} >> stream\n${stream}\nendstream endobj`,
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (const object of objects) {
+    offsets.push(pdf.length);
+    pdf += object + "\n";
+  }
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i < offsets.length; i++) pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return pdf;
+}
+
+function downloadBlob(fileName: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function crc32(input: string) {
+  let crc = -1;
+  for (let i = 0; i < input.length; i++) {
+    crc ^= input.charCodeAt(i);
+    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ -1) >>> 0;
+}
+
+function writeUint(value: number, bytes: number) {
+  return Array.from({ length: bytes }, (_, index) => String.fromCharCode((value >>> (index * 8)) & 255)).join("");
+}
+
+function makeSimpleZip(fileName: string, content: string) {
+  const encodedName = unescape(encodeURIComponent(fileName));
+  const encodedContent = unescape(encodeURIComponent(content));
+  const checksum = crc32(encodedContent);
+  const localHeader = "PK\x03\x04" + writeUint(20, 2) + writeUint(0, 2) + writeUint(0, 2) + writeUint(0, 2) + writeUint(0, 2) + writeUint(checksum, 4) + writeUint(encodedContent.length, 4) + writeUint(encodedContent.length, 4) + writeUint(encodedName.length, 2) + writeUint(0, 2) + encodedName;
+  const centralHeader = "PK\x01\x02" + writeUint(20, 2) + writeUint(20, 2) + writeUint(0, 2) + writeUint(0, 2) + writeUint(0, 2) + writeUint(0, 2) + writeUint(checksum, 4) + writeUint(encodedContent.length, 4) + writeUint(encodedContent.length, 4) + writeUint(encodedName.length, 2) + writeUint(0, 2) + writeUint(0, 2) + writeUint(0, 2) + writeUint(0, 2) + writeUint(0, 4) + writeUint(0, 4) + encodedName;
+  const end = "PK\x05\x06" + writeUint(0, 2) + writeUint(0, 2) + writeUint(1, 2) + writeUint(1, 2) + writeUint(centralHeader.length, 4) + writeUint(localHeader.length + encodedContent.length, 4) + writeUint(0, 2);
+  return localHeader + encodedContent + centralHeader + end;
+}
+
+function exportRows(title: string, baseFileName: string, rows: ExportRow[], format: ExportFormat) {
+  const safeName = baseFileName.replace(/[^a-z0-9-_]+/gi, "-").toLowerCase();
+  const csv = rowsToCsv(rows);
+  if (format === "csv") return downloadBlob(`${safeName}.csv`, new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  if (format === "excel") return downloadBlob(`${safeName}.xls`, new Blob([rowsToHtmlTable(title, rows)], { type: "application/vnd.ms-excel;charset=utf-8" }));
+  if (format === "pdf") return downloadBlob(`${safeName}.pdf`, new Blob([rowsToPdf(title, rows)], { type: "application/pdf" }));
+  return downloadBlob(`${safeName}.zip`, new Blob([makeSimpleZip(`${safeName}.csv`, csv)], { type: "application/zip" }));
+}
 function StatCard({ icon: Icon, label, value, sub, color }: { icon: any; label: string; value: string; sub: string; color: string }) {
   return (
     <div className="card stat-card">
@@ -130,6 +249,40 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`badge ${status}`}>{status.replace("_", " ")}</span>;
 }
 
+function PaginationBar({ total, page, pageCount, pageSize, onPage }: { total: number; page: number; pageCount: number; pageSize: number; onPage: (next: number) => void }) {
+  const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, total);
+  return (
+    <div className="pagination-bar">
+      <span className="muted">Showing {start}-{end} of {total}</span>
+      <div className="controls">
+        <button className="btn secondary" disabled={page <= 1} onClick={() => onPage(Math.max(1, page - 1))}>Previous</button>
+        <span className="page-count">Page {page} / {pageCount}</span>
+        <button className="btn secondary" disabled={page >= pageCount} onClick={() => onPage(Math.min(pageCount, page + 1))}>Next</button>
+      </div>
+    </div>
+  );
+}
+function ExportMenu({ title, fileName, rows }: { title: string; fileName: string; rows: ExportRow[] }) {
+  const [open, setOpen] = useState(false);
+  const choose = (format: ExportFormat) => {
+    setOpen(false);
+    exportRows(title, fileName, rows, format);
+  };
+  return (
+    <div className="export-menu">
+      <button className="btn secondary" onClick={() => setOpen((next) => !next)}><Download size={15} /> Export</button>
+      {open && (
+        <div className="export-options">
+          <button onClick={() => choose("excel")}>Excel</button>
+          <button onClick={() => choose("zip")}>ZIP</button>
+          <button onClick={() => choose("pdf")}>PDF</button>
+          <button onClick={() => choose("csv")}>CSV</button>
+        </div>
+      )}
+    </div>
+  );
+}
 const emptyAdminForm = { username: "", email: "", password: "" };
 
 function PasswordInput({ value, onChange, placeholder }: { value: string; onChange: (value: string) => void; placeholder: string }) {
@@ -218,6 +371,13 @@ export default function AdminPanel() {
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
   const [fieldLocations, setFieldLocations] = useState<FieldLocation[]>([]);
   const [employeeDraft, setEmployeeDraft] = useState<Partial<Employee> | null>(null);
+  const [deductionInput, setDeductionInput] = useState("");
+  const [employeePage, setEmployeePage] = useState(1);
+  const [attendancePage, setAttendancePage] = useState(1);
+  const [salaryPage, setSalaryPage] = useState(1);
+  const [leavePage, setLeavePage] = useState(1);
+  const [communityPage, setCommunityPage] = useState(1);
+  const [fieldPage, setFieldPage] = useState(1);
   const [selectedRole, setSelectedRole] = useState<string>("all");
   const [selectedLeaveRole, setSelectedLeaveRole] = useState<string | null>(null);
   const [selectedLeaveMessage, setSelectedLeaveMessage] = useState<LeaveRequest | null>(null);
@@ -300,6 +460,10 @@ export default function AdminPanel() {
     });
   }, [employees, query, selectedRole]);
 
+  useEffect(() => {
+    setEmployeePage(1);
+  }, [query, selectedRole]);
+
   const roleData = Object.entries(summary?.roleCounts ?? {}).map(([name, value]) => ({ name: roleLabels[name] ?? name, value }));
   const dailyData = attendance.slice(0, 14).reverse().map((r) => ({ date: r.dateKey.slice(5), present: r.status === "present" ? 1 : 0, half: r.status === "half_day" ? 1 : 0 }));
   const totalPayroll = salary.reduce((sum, row) => sum + row.salary.netPayable, 0);
@@ -312,10 +476,50 @@ export default function AdminPanel() {
   const onDutyFieldLocations = fieldLocations.filter((location) => location.isOnDuty);
   const selectedFieldLocation =
     fieldLocations.find((location) => location.employee.id === selectedFieldId) ?? locatedFieldLocations[0] ?? fieldLocations[0] ?? null;
+
+  useEffect(() => {
+    setLeavePage(1);
+  }, [selectedLeaveRole]);
+
+  const employeePageCount = Math.max(1, Math.ceil(filteredEmployees.length / EMPLOYEE_PAGE_SIZE));
+  const safeEmployeePage = Math.min(employeePage, employeePageCount);
+  const paginatedEmployees = filteredEmployees.slice((safeEmployeePage - 1) * EMPLOYEE_PAGE_SIZE, safeEmployeePage * EMPLOYEE_PAGE_SIZE);
+  const attendancePageCount = Math.max(1, Math.ceil(attendance.length / TABLE_PAGE_SIZE));
+  const safeAttendancePage = Math.min(attendancePage, attendancePageCount);
+  const paginatedAttendance = attendance.slice((safeAttendancePage - 1) * TABLE_PAGE_SIZE, safeAttendancePage * TABLE_PAGE_SIZE);
+  const salaryPageCount = Math.max(1, Math.ceil(salary.length / TABLE_PAGE_SIZE));
+  const safeSalaryPage = Math.min(salaryPage, salaryPageCount);
+  const paginatedSalary = salary.slice((safeSalaryPage - 1) * TABLE_PAGE_SIZE, safeSalaryPage * TABLE_PAGE_SIZE);
+  const leavePageCount = Math.max(1, Math.ceil(filteredLeaves.length / TABLE_PAGE_SIZE));
+  const safeLeavePage = Math.min(leavePage, leavePageCount);
+  const paginatedLeaves = filteredLeaves.slice((safeLeavePage - 1) * TABLE_PAGE_SIZE, safeLeavePage * TABLE_PAGE_SIZE);
+  const communityPageCount = Math.max(1, Math.ceil(community.length / CARD_PAGE_SIZE));
+  const safeCommunityPage = Math.min(communityPage, communityPageCount);
+  const paginatedCommunity = community.slice((safeCommunityPage - 1) * CARD_PAGE_SIZE, safeCommunityPage * CARD_PAGE_SIZE);
+  const fieldPageCount = Math.max(1, Math.ceil(fieldLocations.length / CARD_PAGE_SIZE));
+  const safeFieldPage = Math.min(fieldPage, fieldPageCount);
+  const paginatedFieldLocations = fieldLocations.slice((safeFieldPage - 1) * CARD_PAGE_SIZE, safeFieldPage * CARD_PAGE_SIZE);
+
+  const employeeExportRows = filteredEmployees.map((e) => ({ Employee: e.name, Code: e.employeeCode, Role: roleLabels[e.role], Phone: e.phone, Department: e.department, BasicPay: e.monthlySalary, Advance: e.advanceMoney ?? 0, HourDeduction: formatHours(e.workingHourDeductionMinutes ?? 0), PerDay: e.perDaySalary, PerHour: Math.round(e.perDaySalary / 9), JoinedOn: e.joinedOn }));
+  const attendanceExportRows = attendance.map((r) => ({ Date: r.dateKey, Employee: r.employee?.name ?? r.employeeId, Role: r.employee?.role ? roleLabels[r.employee.role] : "", Status: r.status, CheckIn: formatTime(r.checkInTime), CheckOut: formatTime(r.checkOutTime), TotalHours: formatHours(r.workedMinutes), CheckInAddress: r.checkInAddress ?? "", CheckOutAddress: r.checkOutAddress ?? "" }));
+  const salaryExportRows = salary.map(({ employee, salary: s }) => ({ Employee: employee.name, Code: employee.employeeCode, Role: roleLabels[employee.role], Attendance: `${s.attendancePercent}%`, PresentDays: s.presentDays, Earned: s.earnedBasic, Overtime: s.overtimeBonus, Advance: s.advanceMoney ?? employee.advanceMoney ?? 0, HourDeduction: formatHours(s.workingHourDeductionMinutes ?? employee.workingHourDeductionMinutes ?? 0), DeductionReason: s.workingHourDeductionReason ?? employee.workingHourDeductionReason ?? "", Gross: s.grossPayable ?? s.earnedBasic + s.overtimeBonus, NetPayable: s.netPayable }));
+  const leaveExportRows = filteredLeaves.map((request) => ({ Employee: request.employee?.name ?? request.employeeId, Code: request.employee?.employeeCode ?? "", Role: roleLabels[request.role], LeaveDate: request.leaveDate, RequestedOn: formatDateTime(request.createdAt), Message: request.message, Status: request.status, AdminResponse: request.adminResponse ?? "" }));
+  const communityExportRows = community.map((post) => ({ Type: post.type, Title: post.title, Message: post.body, Audience: post.audience, Status: post.isPublished ? "Published" : "Draft", CreatedAt: formatDateTime(post.createdAt) }));
+  const fieldExportRows = fieldLocations.map((location) => ({ Employee: location.employee.name, Code: location.employee.employeeCode, Phone: location.employee.phone, Status: location.isOnDuty ? "On duty" : "Off duty", Latitude: location.latitude ?? "", Longitude: location.longitude ?? "", Address: location.address ?? "Location not received", Updated: locationFreshness(location.locationUpdatedAt), CheckIn: formatTime(location.checkInTime) }));
+  const openEmployeeEdit = (employee: Employee) => {
+    setEmployeeDraft(employee);
+    setDeductionInput(minutesToDeductionInput(employee.workingHourDeductionMinutes ?? 0));
+  };
+
+  const closeEmployeeEdit = () => {
+    setEmployeeDraft(null);
+    setDeductionInput("");
+  };
+
   const saveEmployee = async () => {
     if (!employeeDraft?.id) return;
     await api.updateEmployee(employeeDraft.id, employeeDraft);
-    setEmployeeDraft(null);
+    closeEmployeeEdit();
     setSuccess("Employee updated successfully");
     await loadAll();
   };
@@ -394,12 +598,8 @@ export default function AdminPanel() {
     <div className={`app-shell ${dark ? "dark" : "light"}`}>
       <aside className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
         <div className="brand">
-          <img src="/srv-logo-white.png" alt="SRV" className="brand-logo" />
-          {sidebarOpen && (
-            <div>
-              <div className="brand-title">SRV Admin</div>
-            </div>
-          )}
+          <div className="brand-logo-plate"><img src="/srv-logo.png" alt="SRV" className="brand-logo" /></div>
+          {sidebarOpen && <div className="brand-title">Attendance Admin</div>}
         </div>
         <nav className="nav">
           {navItems.map(({ id, label, icon: Icon }) => (
@@ -526,6 +726,7 @@ export default function AdminPanel() {
                   <h2 className="card-title">{selectedRole === "all" ? "Employees" : roleLabels[selectedRole]}</h2>
                   <div className="controls">
                     <button className={`btn secondary ${selectedRole === "all" ? "soft-active" : ""}`} onClick={() => setSelectedRole("all")}>All</button>
+                    <ExportMenu title="Employees" fileName="employees" rows={employeeExportRows} />
                     <span className="role-pill">{filteredEmployees.length} shown</span>
                   </div>
                 </div>
@@ -533,7 +734,7 @@ export default function AdminPanel() {
                   <table>
                     <thead><tr><th>Employee</th><th>Role</th><th>Phone</th><th>Basic Pay</th><th>Advance</th><th>Hour Deduction</th><th>Per Day</th><th>Per Hour</th><th>Action</th></tr></thead>
                     <tbody>
-                      {filteredEmployees.map((e) => (
+                      {paginatedEmployees.map((e) => (
                         <tr key={e.id}>
                           <td><div className="employee-cell"><div className="avatar">{e.avatarColorSeed}</div><div><strong>{e.name}</strong><div className="muted">{e.employeeCode}</div></div></div></td>
                           <td>{roleLabels[e.role]}</td>
@@ -545,7 +746,7 @@ export default function AdminPanel() {
                           <td>{money(Math.round(e.perDaySalary / 9))}</td>
                           <td>
                             <div className="controls">
-                              <button className="icon-action" onClick={() => setEmployeeDraft(e)} title="Edit employee"><Pencil size={15} /></button>
+                              <button className="icon-action" onClick={() => openEmployeeEdit(e)} title="Edit employee"><Pencil size={15} /></button>
                               <button className="icon-action danger-btn" onClick={() => deleteEmployee(e)} title="Delete employee"><Trash2 size={15} /></button>
                             </div>
                           </td>
@@ -554,6 +755,7 @@ export default function AdminPanel() {
                     </tbody>
                   </table>
                 </div>
+                <PaginationBar total={filteredEmployees.length} page={safeEmployeePage} pageCount={employeePageCount} pageSize={EMPLOYEE_PAGE_SIZE} onPage={setEmployeePage} />
               </div>
             </div>
           )}
@@ -609,9 +811,9 @@ export default function AdminPanel() {
                 </div>
 
                 <div className="card card-pad field-list-card">
-                  <div className="section-head"><h2 className="card-title">Sales / Field Team</h2><span className="role-pill">{fieldLocations.length} employees</span></div>
+                  <div className="section-head"><h2 className="card-title">Sales / Field Team</h2><div className="controls"><ExportMenu title="Field Tracking" fileName="field-tracking" rows={fieldExportRows} /><span className="role-pill">{fieldLocations.length} employees</span></div></div>
                   <div className="field-location-list">
-                    {fieldLocations.map((location) => (
+                    {paginatedFieldLocations.map((location) => (
                       <button
                         key={location.employee.id}
                         className={`field-location-item ${selectedFieldLocation?.employee.id === location.employee.id ? "active" : ""}`}
@@ -632,18 +834,19 @@ export default function AdminPanel() {
                     ))}
                     {fieldLocations.length === 0 && <div className="muted">No Sales / Field employees found.</div>}
                   </div>
+                  <PaginationBar total={fieldLocations.length} page={safeFieldPage} pageCount={fieldPageCount} pageSize={CARD_PAGE_SIZE} onPage={setFieldPage} />
                 </div>
               </div>
             </div>
           )}
           {active === "attendance" && (
             <div className="card">
-              <div className="card-pad section-head"><h2 className="card-title">Attendance Control</h2><span className="role-pill">Last 30 days</span></div>
+              <div className="card-pad section-head"><h2 className="card-title">Attendance Control</h2><div className="controls"><ExportMenu title="Attendance Control" fileName="attendance" rows={attendanceExportRows} /><span className="role-pill">Last 30 days</span></div></div>
               <div className="table-wrap">
                 <table>
                   <thead><tr><th>Date</th><th>Employee</th><th>Status</th><th>In</th><th>Out</th><th>Total Hours</th></tr></thead>
                   <tbody>
-                    {attendance.map((r) => (
+                    {paginatedAttendance.map((r) => (
                       <tr key={r.id}>
                         <td>{r.dateKey}</td>
                         <td>{r.employee?.name ?? r.employeeId}</td>
@@ -656,17 +859,18 @@ export default function AdminPanel() {
                   </tbody>
                 </table>
               </div>
+              <PaginationBar total={attendance.length} page={safeAttendancePage} pageCount={attendancePageCount} pageSize={TABLE_PAGE_SIZE} onPage={setAttendancePage} />
             </div>
           )}
 
           {active === "salary" && (
             <div className="card">
-              <div className="card-pad section-head"><h2 className="card-title">Salary Report</h2><span className="role-pill">{money(totalPayroll)} total</span></div>
+              <div className="card-pad section-head"><h2 className="card-title">Salary Report</h2><div className="controls"><ExportMenu title="Salary Report" fileName="salary" rows={salaryExportRows} /><span className="role-pill">{money(totalPayroll)} total</span></div></div>
               <div className="table-wrap">
                 <table>
                   <thead><tr><th>Employee</th><th>Attendance</th><th>Present</th><th>Earned</th><th>Overtime</th><th>Advance</th><th>Hour Deduction</th><th>Gross</th><th>Net Payable</th></tr></thead>
                   <tbody>
-                    {salary.map(({ employee, salary: s }) => (
+                    {paginatedSalary.map(({ employee, salary: s }) => (
                       <tr key={employee.id}>
                         <td><div className="employee-cell"><div className="avatar">{employee.avatarColorSeed}</div>{employee.name}</div></td>
                         <td>{s.attendancePercent}%</td>
@@ -682,6 +886,7 @@ export default function AdminPanel() {
                   </tbody>
                 </table>
               </div>
+              <PaginationBar total={salary.length} page={safeSalaryPage} pageCount={salaryPageCount} pageSize={TABLE_PAGE_SIZE} onPage={setSalaryPage} />
             </div>
           )}
 
@@ -707,6 +912,7 @@ export default function AdminPanel() {
                   <h2 className="card-title">{selectedLeaveRole ? roleLabels[selectedLeaveRole] : "All Leave Requests"}</h2>
                   <div className="controls">
                     <button className={`btn secondary ${!selectedLeaveRole ? "soft-active" : ""}`} onClick={() => setSelectedLeaveRole(null)}>All</button>
+                    <ExportMenu title="Leave Requests" fileName="leave-requests" rows={leaveExportRows} />
                     <span className="role-pill">{filteredLeaves.length} requests</span>
                   </div>
                 </div>
@@ -714,7 +920,7 @@ export default function AdminPanel() {
                   <table>
                     <thead><tr><th>Employee</th><th>Role</th><th>Leave Date</th><th>Requested On</th><th>Message</th><th>Status</th><th>Response</th></tr></thead>
                     <tbody>
-                      {filteredLeaves.map((request) => (
+                      {paginatedLeaves.map((request) => (
                         <tr key={request.id}>
                           <td><div className="employee-cell"><div className="avatar">{request.employee?.avatarColorSeed ?? "SR"}</div><div><strong>{request.employee?.name ?? request.employeeId}</strong><div className="muted">{request.employee?.employeeCode ?? "Employee"}</div></div></div></td>
                           <td>{roleLabels[request.role]}</td>
@@ -738,6 +944,7 @@ export default function AdminPanel() {
                     </tbody>
                   </table>
                 </div>
+                <PaginationBar total={filteredLeaves.length} page={safeLeavePage} pageCount={leavePageCount} pageSize={TABLE_PAGE_SIZE} onPage={setLeavePage} />
               </div>
             </div>
           )}
@@ -762,9 +969,9 @@ export default function AdminPanel() {
                 </div>
               </div>
               <div className="card card-pad">
-                <div className="section-head"><h2 className="card-title">Community Feed</h2><span className="role-pill">{community.length} posts</span></div>
+                <div className="section-head"><h2 className="card-title">Community Feed</h2><div className="controls"><ExportMenu title="Community Feed" fileName="community-feed" rows={communityExportRows} /><span className="role-pill">{community.length} posts</span></div></div>
                 <div className="community-list">
-                  {community.map((post) => (
+                  {paginatedCommunity.map((post) => (
                     <div className="community-item" key={post.id}>
                       <div className="section-head" style={{ marginBottom: 8 }}>
                         <span className={`badge ${post.type}`}>{post.type}</span>
@@ -779,6 +986,7 @@ export default function AdminPanel() {
                     </div>
                   ))}
                 </div>
+                <PaginationBar total={community.length} page={safeCommunityPage} pageCount={communityPageCount} pageSize={CARD_PAGE_SIZE} onPage={setCommunityPage} />
               </div>
             </div>
           )}
@@ -837,20 +1045,20 @@ export default function AdminPanel() {
         </div>
       )}
       {employeeDraft && (
-        <div className="modal-overlay" onClick={() => setEmployeeDraft(null)}>
+        <div className="modal-overlay" onClick={closeEmployeeEdit}>
           <div className="edit-modal card card-pad" onClick={(event) => event.stopPropagation()}>
             <div className="section-head">
               <h2 className="card-title">Edit Employee</h2>
-              <button className="icon-btn" onClick={() => setEmployeeDraft(null)}><X size={16} /></button>
+              <button className="icon-btn" onClick={closeEmployeeEdit}><X size={16} /></button>
             </div>
             <div className="grid form-grid">
-              <input className="input" value={employeeDraft.name ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, name: e.target.value })} placeholder="Employee name" />
-              <input className="input" value={employeeDraft.phone ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, phone: e.target.value.replace(/\D/g, "").slice(0, 10) })} placeholder="Mobile number" />
-              <input className="input" value={employeeDraft.email ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, email: e.target.value })} placeholder="Email optional" />
-              <input className="input" type="number" value={employeeDraft.monthlySalary ?? 0} onChange={(e) => setEmployeeDraft({ ...employeeDraft, monthlySalary: Number(e.target.value) })} placeholder="Basic pay" />
-              <input className="input" type="number" min="0" value={employeeDraft.advanceMoney ?? 0} onChange={(e) => setEmployeeDraft({ ...employeeDraft, advanceMoney: Math.max(0, Number(e.target.value) || 0) })} placeholder="Advance money / borrowing" />
-                          <input className="input" type="number" min="0" step="0.25" value={Number(employeeDraft.workingHourDeductionMinutes ?? 0) / 60} onChange={(e) => setEmployeeDraft({ ...employeeDraft, workingHourDeductionMinutes: Math.max(0, Math.round((Number(e.target.value) || 0) * 60)) })} placeholder="Deduct working hours" />
-              <textarea className="textarea wide-field" value={employeeDraft.workingHourDeductionReason ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, workingHourDeductionReason: e.target.value })} placeholder="Reason for working hour deduction" />
+              <label className="field-label">Employee name<input className="input" value={employeeDraft.name ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, name: e.target.value })} placeholder="Enter employee full name" /></label>
+              <label className="field-label">Mobile number<input className="input" value={employeeDraft.phone ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, phone: e.target.value.replace(/\D/g, "").slice(0, 10) })} placeholder="Enter 10 digit mobile number" /></label>
+              <label className="field-label">Email optional<input className="input" value={employeeDraft.email ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, email: e.target.value })} placeholder="Enter email address" /></label>
+              <label className="field-label">Basic pay<input className="input" type="number" value={employeeDraft.monthlySalary ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, monthlySalary: Number(e.target.value) || 0 })} placeholder="Enter monthly basic pay" /></label>
+              <label className="field-label">Advance money / borrowing<input className="input" type="number" min="0" value={employeeDraft.advanceMoney ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, advanceMoney: Math.max(0, Number(e.target.value) || 0) })} placeholder="Example: 2000" /></label>
+              <label className="field-label">Deduct working time<input className="input" inputMode="decimal" value={deductionInput} onChange={(e) => { const value = e.target.value.replace(/[^0-9.:]/g, ""); setDeductionInput(value); setEmployeeDraft({ ...employeeDraft, workingHourDeductionMinutes: parseDeductionInput(value) }); }} placeholder="Example: 2.37 means 2h 37m" /></label>
+              <label className="field-label wide-field">Deduction reason<textarea className="textarea" value={employeeDraft.workingHourDeductionReason ?? ""} onChange={(e) => setEmployeeDraft({ ...employeeDraft, workingHourDeductionReason: e.target.value })} placeholder="Write reason for working hour deduction" /></label>
             </div>
             <div className="salary-preview">
               <span>Per day: <strong>{money(Math.round(Number(employeeDraft.monthlySalary ?? 0) / 30))}</strong></span>
